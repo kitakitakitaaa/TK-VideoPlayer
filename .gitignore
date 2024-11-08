@@ -1,1 +1,4 @@
 config.xml
+main.spec
+/build
+/dist
