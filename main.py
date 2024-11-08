@@ -8,6 +8,8 @@ import platform
 import xml.etree.ElementTree as ET
 import json
 from screeninfo import get_monitors
+import socket
+import threading
 
 class MediaPlayer:
     def __init__(self, json_path, width=800, height=600, monitor=0):
@@ -20,6 +22,7 @@ class MediaPlayer:
         # tkinterウィンドウの設定
         self.root = tk.Tk()
         self.root.title("Media Player")
+        self.root.configure(bg='black')  # ルートウィンドウの背景を黒に設定
         
         # タイトルバーを消す
         self.root.overrideredirect(True)
@@ -57,6 +60,11 @@ class MediaPlayer:
         self.frame.configure(width=width, height=height)
         self.frame.pack_propagate(False)
         
+        # フレームの背景色を黒に設定
+        style = ttk.Style()
+        style.configure('TFrame', background='black')
+        self.frame.configure(style='TFrame')
+        
         # カーソルを非表示にする
         self.root.config(cursor="none")
         
@@ -64,7 +72,7 @@ class MediaPlayer:
         vlc_args = [
             '--no-xlib',  # Linuxでの警告を抑制
             '--quiet',    # 警告メッセージを抑制
-            '--no-video-title-show',  # ビデオタイトルを表示しない
+            '--no-video-title-show',  # ビデオタイトルを表示しい
             '--no-snapshot-preview',   # スナップショットプレビューを無効化
             '--directx-device=default' # DirectXデバイスをデフォルトに設定
         ]
@@ -95,7 +103,7 @@ class MediaPlayer:
         # グローバルなイベントバインディングを追加
         self.root.bind_all('<Motion>', self.hide_cursor)
         
-        # モニター情報の取得と設定
+        # モター情報の取得と設定
         monitors = get_monitors()
         if 0 <= monitor < len(monitors):
             target_monitor = monitors[monitor]
@@ -107,6 +115,14 @@ class MediaPlayer:
             # ウィンドウを指定モニターに配置し、そのモニターのサイズに合わせる
             self.root.geometry(f"{self.monitor_width}x{self.monitor_height}+{self.monitor_x}+{self.monitor_y}")
             self.root.update()
+        
+        # UDP受信用のソケットを設定
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.bind(('127.0.0.1', 12345))  # ローカルホストのポート5000で待ち受け
+        self.udp_socket.setblocking(False)  # ノンブロッキングモードに設定
+        
+        # 現在の再生インデックスを追加
+        self.current_index = 0
     
     def hide_cursor(self, event=None):
         """カーソルを強制的に非表示にする"""
@@ -122,38 +138,82 @@ class MediaPlayer:
         # 動画ファイルの拡張子
         video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv']
         
-        # JSONで指定された順序で動画ファイルのみを追加
-        for file_path in file_order:
+        # 既存のメディアファイルリストをクリア
+        self.media_files = []
+        
+        # インデックス0から処理するように並び替え
+        for i in range(len(file_order)):
+            file_path = file_order[i]
             ext = Path(file_path).suffix.lower()
             if ext in video_extensions:
                 self.media_files.append({
                     'path': file_path,
-                    'type': 'video'
+                    'type': 'video',
+                    'index': i  # インデックスを保存（必要な場合）
                 })
     
     def play(self):
         def play_media():
+            last_check_time = time.time()
+            check_interval = 0.1  # UDPチェックの間隔（秒）
+            
             while True:
-                for media in self.media_files:
-                    media_path = media['path']
-                    
-                    media_obj = self.instance.media_new(media_path)
-                    self.player.set_media(media_obj)
-                    self.player.play()
-                    
-                    # メディアが読み込まれるまで待機
-                    time.sleep(0.5)
-                    
-                    while self.player.is_playing():
-                        self.root.update()  # tkinterウィンドウの更新
-                        time.sleep(0.1)
-                            
-                    if not self.root.winfo_exists():  # ウィンドウが閉じられた場合
-                        return
-        
-        # 別スレッドで再生を開始
-        import threading
-        thread = threading.Thread(target=play_media, daemon=True)
+                current_time = time.time()
+                
+                # UDPメッセージのチェックを一定間隔でのみ実行
+                if current_time - last_check_time >= check_interval:
+                    try:
+                        data, addr = self.udp_socket.recvfrom(1024)
+                        message = data.decode('utf-8').strip()
+                        print(f"受信したコマンド: {message}")
+                        
+                        if message == 'video_reload':
+                            print("動画リロードコマンドを受信")
+                            self.player.stop()
+                            self.load_media_files()
+                            self.current_index = 0
+                            self._play_next_media()
+                            last_check_time = current_time
+                            continue
+                        elif message == 'play':
+                            print("開始コマンドを実行")
+                            if self.player.get_state() == vlc.State.Paused:
+                                self.player.set_pause(0)
+                            else:
+                                self.player.play()
+                        elif message == 'pause':
+                            print("一時停止コマンドを実行")
+                            self.player.set_pause(1)
+                        elif message == 'stop':
+                            print("停止コマンドを実行")
+                            self.player.stop()
+                        elif message == 'next':
+                            print("次の動画コマンドを実行")
+                            self.player.stop()
+                            self.current_index = (self.current_index + 1) % len(self.media_files)
+                            self._play_next_media()
+                        
+                    except BlockingIOError:
+                        pass
+                    last_check_time = current_time
+
+                # メディア終了時の処理
+                if self.player.get_state() == vlc.State.Ended:
+                    self.current_index = (self.current_index + 1) % len(self.media_files)
+                    self._play_next_media()
+
+                # 必要な時だけウィンドウを更新
+                if self.root.winfo_exists():
+                    self.root.update()
+                else:
+                    return
+
+                # スリープ時間を最適化
+                time.sleep(0.033)  # 約30FPS相当
+
+        # スレッドを開始
+        thread = threading.Thread(target=play_media)
+        thread.daemon = True
         thread.start()
         
         # メインループの開始
@@ -199,6 +259,22 @@ class MediaPlayer:
             })
         
         return monitors
+
+    def _play_next_media(self):
+        """次のメディアファイルを再生する（最適化版）"""
+        if len(self.media_files) > 0:
+            current_file = self.media_files[self.current_index]
+            media_path = current_file['path']
+            
+            # 同じメディアの重複ロードを防止
+            if not hasattr(self, '_last_media_path') or self._last_media_path != media_path:
+                print(f"再生開始: index={self.current_index}, path={media_path}")
+                media = self.instance.media_new(media_path)
+                self.player.set_media(media)
+                self._last_media_path = media_path
+            
+            self.player.play()
+            self.hide_cursor()
 
 def load_config():
     tree = ET.parse('config.xml')
