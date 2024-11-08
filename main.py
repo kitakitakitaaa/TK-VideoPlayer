@@ -7,25 +7,58 @@ from tkinter import ttk
 import platform
 import xml.etree.ElementTree as ET
 import json
+from screeninfo import get_monitors
 
 class MediaPlayer:
-    def __init__(self, json_path, width=800, height=600):
+    def __init__(self, json_path, width=800, height=600, monitor=0):
+        # デバッグ用：設定値の確認
+        print(f"設定値: width={width}, height={height}, monitor={monitor}")
+        
         self.json_path = json_path
         self.media_files = []
         
         # tkinterウィンドウの設定
         self.root = tk.Tk()
         self.root.title("Media Player")
-        self.root.geometry(f"{width}x{height}")
+        
+        # タイトルバーを消す
+        self.root.overrideredirect(True)
+        
+        # ウィンドウを最前面に固定
+        self.root.attributes('-topmost', True)
+        
+        # 現在のウィンドウサイズを確認
+        print(f"初期ウィンドウサイズ: {self.root.winfo_width()}x{self.root.winfo_height()}")
+        
+        # 明示的にウィンドウサイズを設定
+        self.root.minsize(width, height)
+        self.root.maxsize(width, height)
         self.root.resizable(False, False)
+        
+        # 指定したモニターの位置とサイズを取得
+        monitors = self.get_monitor_info()
+        if monitor < len(monitors):
+            mon = monitors[monitor]
+            x = mon['x']
+            y = mon['y']
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
+        else:
+            self.root.geometry(f"{width}x{height}")
+        
+        # 強制的に更新
+        self.root.update_idletasks()
+        
+        # 設定後のウィンドウサイズを確認
+        print(f"設定後のウィンドウサイズ: {self.root.winfo_width()}x{self.root.winfo_height()}")
+        
+        # フレームの設定
+        self.frame = ttk.Frame(self.root)
+        self.frame.pack(fill=tk.BOTH, expand=True)
+        self.frame.configure(width=width, height=height)
+        self.frame.pack_propagate(False)
         
         # カーソルを非表示にする
         self.root.config(cursor="none")
-        
-        # フレームの作成
-        self.frame = ttk.Frame(self.root, width=width, height=height)
-        self.frame.pack(fill=tk.BOTH, expand=True)
-        self.frame.pack_propagate(False)
         
         # VLCインスタンスの設定（オプション追加）
         vlc_args = [
@@ -53,11 +86,27 @@ class MediaPlayer:
         # アスペクト比の設定を変更
         self.player.video_set_scale(0)  # 自動スケーリングを有効化
         
-        # すべてのフレームで初期設定
+        # すべてのレームで初期設定
         self.frame.config(cursor="none")
+        
+        # ESCキーのバインディングを修正（フルスクリーン解除ではなく、アプリケーションを終了）
+        self.root.bind('<Escape>', lambda e: self.stop())
         
         # グローバルなイベントバインディングを追加
         self.root.bind_all('<Motion>', self.hide_cursor)
+        
+        # モニター情報の取得と設定
+        monitors = get_monitors()
+        if 0 <= monitor < len(monitors):
+            target_monitor = monitors[monitor]
+            self.monitor_x = target_monitor.x
+            self.monitor_y = target_monitor.y
+            self.monitor_width = target_monitor.width
+            self.monitor_height = target_monitor.height
+            
+            # ウィンドウを指定モニターに配置し、そのモニターのサイズに合わせる
+            self.root.geometry(f"{self.monitor_width}x{self.monitor_height}+{self.monitor_x}+{self.monitor_y}")
+            self.root.update()
     
     def hide_cursor(self, event=None):
         """カーソルを強制的に非表示にする"""
@@ -124,7 +173,32 @@ class MediaPlayer:
     
     def play_media(self, file_path):
         # ... existing code ...
-        self.hide_cursor()  # メディア再生時にカーソルを非表示に
+        self.hide_cursor()  # メデア再生時にカーソルを非表示に
+    
+    def get_monitor_info(self):
+        """接続されているモニターの情報を取得"""
+        monitors = []
+        
+        try:
+            for m in get_monitors():
+                monitors.append({
+                    'x': m.x,
+                    'y': m.y,
+                    'width': m.width,
+                    'height': m.height
+                })
+        except Exception:
+            # モニター情報の取得に失敗した場合はプライマリディスプレイの情報を使用
+            width = self.root.winfo_screenwidth()
+            height = self.root.winfo_screenheight()
+            monitors.append({
+                'x': 0,
+                'y': 0,
+                'width': width,
+                'height': height
+            })
+        
+        return monitors
 
 def load_config():
     tree = ET.parse('config.xml')
@@ -133,7 +207,8 @@ def load_config():
     config = {
         'json_path': root.find('./paths/settingJson_path').text,
         'width': int(root.find('./display/width').text),
-        'height': int(root.find('./display/height').text)
+        'height': int(root.find('./display/height').text),
+        'monitor': int(root.find('./display/monitor').text)  # 追加
     }
     return config
 
@@ -142,7 +217,8 @@ def main():
     player = MediaPlayer(
         json_path=config['json_path'],
         width=config['width'],
-        height=config['height']
+        height=config['height'],
+        monitor=config['monitor']  # 追加
     )
     player.play()
 
