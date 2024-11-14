@@ -97,7 +97,7 @@ class MediaPlayer:
         # すべてのレームで初期設定
         self.frame.config(cursor="none")
         
-        # ESCキーのバインディングを修正（フルスクリーン解除ではなく、アプリケーションを終了）
+        # ESCキーのバインディングを修正（フルスクリーン解除で���なく、アプリケーションを終了）
         self.root.bind('<Escape>', lambda e: self.stop())
         
         # グローバルなイベントバインディングを追加
@@ -130,37 +130,49 @@ class MediaPlayer:
         self.frame.config(cursor="none")
     
     def load_media_files(self):
-        # JSONファイルから再生順序を読み込む
-        with open(self.json_path, 'r') as f:
-            settings = json.load(f)
-            file_order = settings.get('file_order', [])
+        """JSONファイルから再生順序を読み込み、その順序通りにメディアファイルをセットする"""
+        try:
+            # JSONファイルをUTF-8で読み込む
+            with open(self.json_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+                file_order = settings.get('file_order', [])
+            
+            # 動画ファイルの拡張子
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv']
+            
+            # 既存のメディアファイルリストをクリア
+            self.media_files = []
+            
+            # file_orderの順序通りにファイルを追加
+            for file_path in file_order:
+                # パスをUnicode文字列として正規化
+                normalized_path = os.path.normpath(file_path)
+                ext = Path(normalized_path).suffix.lower()
+                if ext in video_extensions:
+                    self.media_files.append({
+                        'path': normalized_path,
+                        'type': 'video'
+                    })
+            
+            print("メディアファイルを読み込みました:")
+            for i, media in enumerate(self.media_files):
+                print(f"index={i}: {media['path']}")
         
-        # 動画ファイルの拡張子
-        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv']
-        
-        # 既存のメディアファイルリストをクリア
-        self.media_files = []
-        
-        # インデックス0から処理するように並び替え
-        for i in range(len(file_order)):
-            file_path = file_order[i]
-            ext = Path(file_path).suffix.lower()
-            if ext in video_extensions:
-                self.media_files.append({
-                    'path': file_path,
-                    'type': 'video',
-                    'index': i  # インデックスを保存（必要な場合）
-                })
+        except UnicodeDecodeError as e:
+            print(f"ファイル読み込みエラー: {e}")
+            return []
+        except Exception as e:
+            print(f"予期せぬエラー: {e}")
+            return []
     
     def play(self):
         def play_media():
             last_check_time = time.time()
-            check_interval = 0.1  # UDPチェックの間隔（秒）
+            check_interval = 0.1
             
             while True:
                 current_time = time.time()
                 
-                # UDPメッセージのチェックを一定間隔でのみ実行
                 if current_time - last_check_time >= check_interval:
                     try:
                         data, addr = self.udp_socket.recvfrom(1024)
@@ -169,18 +181,18 @@ class MediaPlayer:
                         
                         if message == 'video_reload':
                             print("動画リロードコマンドを受信")
-                            self.player.stop()
-                            self.load_media_files()
-                            self.current_index = 0
-                            self._play_next_media()
-                            last_check_time = current_time
-                            continue
+                            self.player.stop()  # 現在の再生を停止
+                            self.load_media_files()  # JSONの順序通りにメディアファイルを再読み込み
+                            self.current_index = 0  # インデックスを0にリセット
+                            print(f"JSONの先頭から再生を開始します: index={self.current_index}")
+                            self._play_next_media()  # 最初から再生開始
                         elif message == 'play':
                             print("開始コマンドを実行")
-                            if self.player.get_state() == vlc.State.Paused:
-                                self.player.set_pause(0)
-                            else:
+                            current_state = self.player.get_state()
+                            if current_state in [vlc.State.Paused]:
                                 self.player.play()
+                            elif current_state in [vlc.State.Stopped, vlc.State.NothingSpecial, vlc.State.Ended]:
+                                self._play_next_media()
                         elif message == 'pause':
                             print("一時停止コマンドを実行")
                             self.player.set_pause(1)
@@ -200,23 +212,20 @@ class MediaPlayer:
                 # メディア終了時の処理
                 if self.player.get_state() == vlc.State.Ended:
                     self.current_index = (self.current_index + 1) % len(self.media_files)
-                    self._play_next_media()
+                    if not self._play_next_media():
+                        time.sleep(1)
 
-                # 必要な時だけウィンドウを更新
                 if self.root.winfo_exists():
                     self.root.update()
                 else:
                     return
 
-                # スリープ時間を最適化
-                time.sleep(0.033)  # 約30FPS相当
+                time.sleep(0.033)
 
-        # スレッドを開始
         thread = threading.Thread(target=play_media)
         thread.daemon = True
         thread.start()
         
-        # メインループの開始
         self.root.mainloop()
     
     def stop(self):
@@ -262,19 +271,39 @@ class MediaPlayer:
 
     def _play_next_media(self):
         """次のメディアファイルを再生する（最適化版）"""
-        if len(self.media_files) > 0:
+        if not self.media_files:
+            print("再生可能なメディアファイルがありません")
+            return False
+
+        # 全てのファイルをチェック
+        attempts = len(self.media_files)
+        for _ in range(attempts):
             current_file = self.media_files[self.current_index]
             media_path = current_file['path']
             
-            # 同じメディアの重複ロードを防止
-            if not hasattr(self, '_last_media_path') or self._last_media_path != media_path:
-                print(f"再生開始: index={self.current_index}, path={media_path}")
-                media = self.instance.media_new(media_path)
-                self.player.set_media(media)
-                self._last_media_path = media_path
+            if os.path.exists(media_path):
+                try:
+                    # メディアパスをUTF-8として扱う
+                    media = self.instance.media_new(str(media_path))
+                    self.player.set_media(media)
+                    result = self.player.play()
+                    
+                    if result >= 0:  # 再生成功
+                        print(f"再生成功: index={self.current_index}, path={media_path}")
+                        self.hide_cursor()
+                        return True
+                    else:
+                        print(f"再生失敗: index={self.current_index}, path={media_path}")
+                except Exception as e:
+                    print(f"再生エラー: {e}")
+            else:
+                print(f"ファイルが見つかりません: {media_path}")
             
-            self.player.play()
-            self.hide_cursor()
+            # 次のファイルを試す
+            self.current_index = (self.current_index + 1) % len(self.media_files)
+        
+        print("再生可能なファイルが見つかりませんでした")
+        return False
 
 def load_config():
     tree = ET.parse('config.xml')
