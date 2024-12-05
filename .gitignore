@@ -2,3 +2,5 @@ config.xml
 main.spec
 /build
 /dist
+/store
+settings.json

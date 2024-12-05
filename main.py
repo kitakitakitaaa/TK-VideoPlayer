@@ -12,10 +12,19 @@ import socket
 import threading
 
 class MediaPlayer:
-    def __init__(self, json_path, width=800, height=600, monitor=0):
-        # デバッグ用：設定値の確認
-        print(f"設定値: width={width}, height={height}, monitor={monitor}")
-        
+    def __init__(self, json_path, width=800, height=600, monitor="0"):
+        with open(json_path, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+            video_settings = settings.get('video_settings', {})
+            network_settings = settings.get('network_settings', {})
+            width = int(video_settings.get('width', width))
+            height = int(video_settings.get('height', height))
+            monitor = int(video_settings.get('monitor', monitor))
+            
+            # ネットワーク設定を取得
+            self.udp_ip = network_settings.get('source_ip', '127.0.0.1')
+            self.udp_port = int(network_settings.get('port', 12345))
+
         self.json_path = json_path
         self.media_files = []
         
@@ -97,7 +106,7 @@ class MediaPlayer:
         # すべてのレームで初期設定
         self.frame.config(cursor="none")
         
-        # ESCキーのバインディングを修正（フルスクリーン解除で���なく、アプリケーションを終了）
+        # ESCキーのバインディングを有効化
         self.root.bind('<Escape>', lambda e: self.stop())
         
         # グローバルなイベントバインディングを追加
@@ -118,11 +127,17 @@ class MediaPlayer:
         
         # UDP受信用のソケットを設定
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_socket.bind(('127.0.0.1', 12345))  # ローカルホストのポート5000で待ち受け
+        self.udp_socket.bind((self.udp_ip, self.udp_port))  # source_ipを使用して待ち受け
         self.udp_socket.setblocking(False)  # ノンブロッキングモードに設定
         
         # 現在の再生インデックスを追加
         self.current_index = 0
+        
+        # フレームバッファの設定
+        self.frame_buffer = None
+        
+        # 起動時に動画があれば再生
+        self._play_next_media()
     
     def hide_cursor(self, event=None):
         """カーソルを強制的に非表示にする"""
@@ -182,6 +197,42 @@ class MediaPlayer:
                         if message == 'video_reload':
                             print("動画リロードコマンドを受信")
                             self.player.stop()  # 現在の再生を停止
+                            
+                            # 設定ファイルを再読み込みしてウィンドウサイズを更新
+                            with open(self.json_path, 'r', encoding='utf-8') as f:
+                                settings = json.load(f)
+                                video_settings = settings.get('video_settings', {})
+                                width = int(video_settings.get('width', self.root.winfo_width()))
+                                height = int(video_settings.get('height', self.root.winfo_height()))
+                                monitor = int(video_settings.get('monitor', 0))
+                            
+                            # ウィンドウの制約を一時的に解除
+                            self.root.minsize(1, 1)
+                            self.root.maxsize(10000, 10000)
+                            self.root.resizable(True, True)
+                            
+                            # ウィンドウサイズと位置を更新
+                            monitors = self.get_monitor_info()
+                            if monitor < len(monitors):
+                                mon = monitors[monitor]
+                                x = mon['x']
+                                y = mon['y']
+                                self.root.geometry(f"{width}x{height}+{x}+{y}")
+                            else:
+                                self.root.geometry(f"{width}x{height}")
+                            
+                            # フレームサイズも更新
+                            self.frame.configure(width=width, height=height)
+                            
+                            # 強制的に更新
+                            self.root.update()
+                            self.root.update_idletasks()
+                            
+                            # ウィンドウの制約を再設定
+                            self.root.minsize(width, height)
+                            self.root.maxsize(width, height)
+                            self.root.resizable(False, False)
+                            
                             self.load_media_files()  # JSONの順序通りにメディアファイルを再読み込み
                             self.current_index = 0  # インデックスを0にリセット
                             print(f"JSONの先頭から再生を開始します: index={self.current_index}")
@@ -291,6 +342,8 @@ class MediaPlayer:
                     if result >= 0:  # 再生成功
                         print(f"再生成功: index={self.current_index}, path={media_path}")
                         self.hide_cursor()
+                        # SPOUTでレームを送信
+                        self._send_frame_to_spout()
                         return True
                     else:
                         print(f"再生失敗: index={self.current_index}, path={media_path}")
@@ -305,25 +358,58 @@ class MediaPlayer:
         print("再生可能なファイルが見つかりませんでした")
         return False
 
+    def _send_frame_to_spout(self):
+        """現在のフレームをSPOUTで送信"""
+        if self.player.get_state() == vlc.State.Playing:
+            # VLCから現在のフレームを取得
+            frame = self.player.video_take_snapshot(0, 'temp.bmp', 0, 0)
+            if frame and os.path.exists('temp.bmp'):
+                # フレームをSPOUTで送信
+                self.spout_sender.sendImage('temp.bmp')
+                os.remove('temp.bmp')
+
 def load_config():
-    tree = ET.parse('config.xml')
-    root = tree.getroot()
-    
-    config = {
-        'json_path': root.find('./paths/settingJson_path').text,
-        'width': int(root.find('./display/width').text),
-        'height': int(root.find('./display/height').text),
-        'monitor': int(root.find('./display/monitor').text)  # 追加
+    default_settings = {
+        'video_settings': {
+            'width': 800,
+            'height': 600,
+            'monitor': 0
+        },
+        'network_settings': {
+            'source_ip': '127.0.0.1',
+            'port': 12345
+        },
+        'file_order': []
     }
-    return config
+
+    try:
+        with open('settings.json', 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        print("設定ファイルが見つからないか、読み込めません。デフォルト設定を作成します。")
+        store_path = os.path.join(os.path.dirname(__file__), 'store')
+        if os.path.exists(store_path):
+            video_files = []
+            for file in sorted(os.listdir(store_path)):
+                if file.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.wmv')):
+                    video_files.append(os.path.join('store', file))
+            default_settings['file_order'] = video_files
+
+        # デフォルト設定を保存
+        with open('settings.json', 'w', encoding='utf-8') as f:
+            json.dump(default_settings, f, indent=4, ensure_ascii=False)
+        
+        settings = default_settings
+
+    return settings
 
 def main():
     config = load_config()
     player = MediaPlayer(
-        json_path=config['json_path'],
-        width=config['width'],
-        height=config['height'],
-        monitor=config['monitor']  # 追加
+        json_path='settings.json',
+        width=config['video_settings']['width'],
+        height=config['video_settings']['height'],
+        monitor=config['video_settings']['monitor']
     )
     player.play()
 
