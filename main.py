@@ -10,6 +10,7 @@ import json
 from screeninfo import get_monitors
 import socket
 import threading
+import sys  # 追加
 
 class MediaPlayer:
     def __init__(self, json_path, width=800, height=600, monitor="0"):
@@ -22,7 +23,7 @@ class MediaPlayer:
             monitor = int(video_settings.get('monitor', monitor))
             
             # ネットワーク設定を取得
-            self.udp_ip = network_settings.get('source_ip', '127.0.0.1')
+            self.udp_ip = '0.0.0.0'
             self.udp_port = int(network_settings.get('port', 12345))
 
         self.json_path = json_path
@@ -280,8 +281,15 @@ class MediaPlayer:
         self.root.mainloop()
     
     def stop(self):
-        self.player.stop()
-        self.root.destroy()
+        """アプリケーションを完全に終了する"""
+        try:
+            self.player.stop()
+            self.udp_socket.close()  # UDPソケットを明示的にクローズ
+            self.root.destroy()
+            sys.exit(0)  # プログラムを完全に終了
+        except Exception as e:
+            print(f"終了時エラー: {e}")
+            sys.exit(1)  # エラーが発生した場合も強制終了
     
     def play_next(self):
         # ... existing code ...
